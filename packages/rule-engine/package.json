@@ -1,0 +1,22 @@
+{
+  "name": "@medilab/rule-engine",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Rule-based analysis engine for lab results interpretation",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "jest",
+    "clean": "rimraf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@medilab/core": "*",
+    "@medilab/reference-ranges": "*"
+  },
+  "devDependencies": {
+    "rimraf": "^5.0.0",
+    "typescript": "^5.5.0"
+  }
+}

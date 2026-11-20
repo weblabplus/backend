@@ -1,0 +1,23 @@
+{
+  "name": "@medilab/lab-parser",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Parsers for various lab result formats (CSV, JSON, HL7, FHIR)",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "jest",
+    "clean": "rimraf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@medilab/core": "*",
+    "papaparse": "^5.4.1"
+  },
+  "devDependencies": {
+    "@types/papaparse": "^5.3.14",
+    "rimraf": "^5.0.0",
+    "typescript": "^5.5.0"
+  }
+}

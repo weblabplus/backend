@@ -1,0 +1,21 @@
+{
+  "name": "@medilab/ml-engine",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Machine Learning models for pattern detection and trend analysis",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "jest",
+    "clean": "rimraf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@medilab/core": "*"
+  },
+  "devDependencies": {
+    "rimraf": "^5.0.0",
+    "typescript": "^5.5.0"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "baseUrl": ".",
+    "paths": {
+      "better-auth/node": ["./node_modules/better-auth/dist/integrations/node.d.mts"],
+      "better-auth/plugins": ["./node_modules/better-auth/dist/plugins/index.d.mts"]
+    }
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "**/*.test.ts", "better-auth.config.ts"],
+  "references": [
+    { "path": "../core" },
+    { "path": "../lab-parser" },
+    { "path": "../reference-ranges" },
+    { "path": "../rule-engine" },
+    { "path": "../ml-engine" },
+    { "path": "../report-generator" }
+  ]
+}
