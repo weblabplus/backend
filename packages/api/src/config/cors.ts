@@ -25,6 +25,15 @@ export function getAllowedOrigins(): string[] {
   return [...parseOrigins(process.env.CORS_ORIGIN), ...parseOrigins(process.env.WEB_ORIGIN)];
 }
 
+/**
+ * Υπάρχει τουλάχιστον ένα origin που δεν είναι localhost;
+ * Αν όχι, το deployment δεν έχει ρυθμιστεί για production (π.χ. έμεινε η τιμή του
+ * .env.example) και ένα allowlist με σκέτο localhost θα έσπαγε το site.
+ */
+export function hasPublicOrigin(): boolean {
+  return getAllowedOrigins().some(pattern => pattern !== '*' && !LOCAL_HOST.test(pattern));
+}
+
 function matchesPattern(origin: string, pattern: string): boolean {
   if (pattern === '*') return true;
   if (!pattern.includes('*')) return origin === pattern;
@@ -45,6 +54,12 @@ export function isOriginAllowed(origin?: string): boolean {
     return true;
   }
 
+  // Μόνο localhost configured σε production → το allowlist είναι λάθος ρυθμισμένο.
+  // Δεν ρίχνουμε το site: επιτρέπουμε (με warning) όπως η παλιά `cors()`.
+  if (process.env.NODE_ENV === 'production' && !hasPublicOrigin()) {
+    return true;
+  }
+
   return false;
 }
 
@@ -62,5 +77,12 @@ export const corsOptions: CorsOptions = {
 /** Για το `trustedOrigins` του Better Auth (origin του frontend + previews). */
 export function getTrustedOrigins(baseURL: string): string[] {
   const configured = getAllowedOrigins();
+
+  // Production με allowlist μόνο για localhost → μάλλον ξεχάστηκε το WEB_ORIGIN.
+  // Επιτρέπουμε τα Vercel deployments ώστε να μη σπάει το login/logout.
+  if (process.env.NODE_ENV === 'production' && !hasPublicOrigin()) {
+    return [...new Set([...configured, baseURL, 'https://*.vercel.app'])];
+  }
+
   return [...new Set([...configured, baseURL])];
 }
