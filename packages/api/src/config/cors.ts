@@ -104,9 +104,23 @@ export const corsOptions: CorsOptions = {
 export function getTrustedOrigins(baseURL: string): string[] {
   const configured = getAllowedOrigins();
 
+  // Τοπική ανάπτυξη: το frontend μπορεί να ανοίξει από localhost, 127.0.0.1 ή LAN IP.
+  if (!isDeployed()) {
+    return [
+      ...new Set([
+        ...configured,
+        baseURL,
+        'http://localhost:3000',
+        'http://127.0.0.1:3000',
+        'http://localhost:3001',
+        'http://127.0.0.1:3001',
+      ]),
+    ];
+  }
+
   // Deployed instance με ρυθμίσεις που μυρίζουν localhost (.env.local) → επιτρέπουμε
   // τα Vercel deployments ώστε να μη σπάει το login/logout.
-  if (isDeployed() && (looksLikeLeftoverLocalConfig() || !hasPublicOrigin())) {
+  if (looksLikeLeftoverLocalConfig() || !hasPublicOrigin()) {
     return [...new Set([...configured, baseURL, 'https://*.vercel.app'])];
   }
 
