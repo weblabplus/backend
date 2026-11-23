@@ -9,7 +9,7 @@ import { loincCache } from './services/loinc-cache.service';
 import { examCatalog } from './services/exam-catalog.service';
 import { examLoinc } from './services/exam-loinc.service';
 import { resolveLabRepoCredentials, setLabRepoCredentials, loadLabRepoApiKeyFromDb } from './services/lab-repo-config';
-import { getAllowedOrigins, hasPublicOrigin } from './config/cors';
+import { getAllowedOrigins, hasPublicOrigin, isDeployed } from './config/cors';
 import { DATA_DIR } from './config/data-dir';
 import {
   listStaleUsers,
@@ -141,7 +141,7 @@ app.listen(Number(PORT), HOST, () => {
     console.log(
       `🌐 CORS/Better Auth origins: ${origins.length ? origins.join(', ') : '(κανένα — επιτρέπονται όλα)'}`
     );
-    if (process.env.NODE_ENV === 'production' && !hasPublicOrigin()) {
+    if (isDeployed() && !hasPublicOrigin()) {
       console.warn(
         '⚠️  CORS/Better Auth: δεν έχει οριστεί origin του frontend (CORS_ORIGIN / WEB_ORIGIN). ' +
           'Επιτρέπονται προσωρινά όλα ώστε να μη σπάσει το deployment — όρισε π.χ. ' +

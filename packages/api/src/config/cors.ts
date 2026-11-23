@@ -34,6 +34,11 @@ export function hasPublicOrigin(): boolean {
   return getAllowedOrigins().some(pattern => pattern !== '*' && !LOCAL_HOST.test(pattern));
 }
 
+/** Τρέχει σε deployed περιβάλλον (Render ή production build); */
+export function isDeployed(): boolean {
+  return Boolean(process.env.RENDER || process.env.VERCEL) || process.env.NODE_ENV === 'production';
+}
+
 function matchesPattern(origin: string, pattern: string): boolean {
   if (pattern === '*') return true;
   if (!pattern.includes('*')) return origin === pattern;
@@ -54,9 +59,9 @@ export function isOriginAllowed(origin?: string): boolean {
     return true;
   }
 
-  // Μόνο localhost configured σε production → το allowlist είναι λάθος ρυθμισμένο.
+  // Μόνο localhost στο allowlist → το deployment δεν έχει ρυθμιστεί σωστά.
   // Δεν ρίχνουμε το site: επιτρέπουμε (με warning) όπως η παλιά `cors()`.
-  if (process.env.NODE_ENV === 'production' && !hasPublicOrigin()) {
+  if (isDeployed() && !hasPublicOrigin()) {
     return true;
   }
 
@@ -78,9 +83,9 @@ export const corsOptions: CorsOptions = {
 export function getTrustedOrigins(baseURL: string): string[] {
   const configured = getAllowedOrigins();
 
-  // Production με allowlist μόνο για localhost → μάλλον ξεχάστηκε το WEB_ORIGIN.
+  // Allowlist μόνο για localhost → μάλλον ξεχάστηκε το WEB_ORIGIN/CORS_ORIGIN.
   // Επιτρέπουμε τα Vercel deployments ώστε να μη σπάει το login/logout.
-  if (process.env.NODE_ENV === 'production' && !hasPublicOrigin()) {
+  if (isDeployed() && !hasPublicOrigin()) {
     return [...new Set([...configured, baseURL, 'https://*.vercel.app'])];
   }
 

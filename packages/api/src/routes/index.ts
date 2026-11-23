@@ -9,7 +9,8 @@ import { reportGenerator } from '@medilab/report-generator';
 import { SeverityLevel, Patient, Visit, Referral, Exam, Appointment, AppointmentStatus } from '@medilab/core';
 import { referenceRangeManager } from '@medilab/reference-ranges';
 import { authMiddleware, requireRole, requestLogger, rateLimiter } from '../middleware';
-import { corsOptions } from '../config/cors';
+import { corsOptions, getAllowedOrigins, hasPublicOrigin, isDeployed } from '../config/cors';
+import { DATA_DIR } from '../config/data-dir';
 import { dbService, financeStatusFromAmounts, type FinanceEntry, type FinancePayment, type FinanceEntryStatus } from '../db/db.service';
 import {
   getAuth,
@@ -924,6 +925,14 @@ app.get('/api/health', (_req: Request, res: Response) => {
     status: 'ok',
     version: '1.0.0',
     timestamp: new Date().toISOString(),
+    // Χρήσιμο για γρήγορο έλεγχο του deployment (ποια origins/ρυθμίσεις βλέπει το API).
+    config: {
+      nodeEnv: process.env.NODE_ENV || null,
+      corsOrigins: getAllowedOrigins(),
+      trustedOriginsFallback: isDeployed() && !hasPublicOrigin(),
+      dataDir: DATA_DIR,
+      betterAuthUrl: process.env.BETTER_AUTH_URL || null,
+    },
     services: {
       parsers: labParserFactory.getSupportedFormats(),
       rulesLoaded: true,
