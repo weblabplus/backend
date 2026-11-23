@@ -148,9 +148,16 @@ export class DbService {
   }
 
   private async runMigrations(): Promise<void> {
-    const migrationPath = path.resolve(__dirname, 'migration.sql');
-    if (!fs.existsSync(migrationPath)) {
-      console.warn('⚠️ Migration file not found at', migrationPath);
+    // Το tsc δεν αντιγράφει το .sql στο dist — ψάχνουμε και στο src για τα
+    // production builds (π.χ. Render), όπου τρέχει το μεταγλωττισμένο dist.
+    const candidates = [
+      path.resolve(__dirname, 'migration.sql'),
+      path.resolve(__dirname, '..', '..', 'src', 'db', 'migration.sql'),
+    ];
+    const migrationPath = candidates.find(candidate => fs.existsSync(candidate));
+
+    if (!migrationPath) {
+      console.warn('⚠️ Migration file not found. Looked in:', candidates.join(', '));
       return;
     }
 

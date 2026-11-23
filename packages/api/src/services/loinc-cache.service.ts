@@ -7,6 +7,7 @@
 import * as fs from 'fs';
 import { labRepoAuthHeaders, type LabRepoCredentials } from './lab-repo-config';
 import * as path from 'path';
+import { DATA_DIR } from '../config/data-dir';
 
 export interface LoincRecord {
   loincCode: string;
@@ -28,7 +29,7 @@ type LoincNameCache = Record<string, string>;
 /** Full records cache for search */
 type LoincSearchCache = Record<string, LoincRecord>;
 
-const CACHE_DIR = path.resolve(process.cwd(), 'data');
+const CACHE_DIR = DATA_DIR;
 const NAMES_CACHE_FILE = path.join(CACHE_DIR, 'loinc-names.json');
 const SEARCH_CACHE_FILE = path.join(CACHE_DIR, 'loinc-search.json');
 

@@ -8,6 +8,7 @@ import { Pool } from 'pg';
 import { betterAuth } from 'better-auth';
 import { bearer } from 'better-auth/plugins';
 import type { Request } from 'express';
+import { getTrustedOrigins } from '../config/cors';
 
 export type BetterAuth = ReturnType<typeof buildAuth>;
 
@@ -61,7 +62,6 @@ export function createAuth(_pool?: Pool): BetterAuth {
 function buildAuth(pool: Pool, secret: string) {
   const port = process.env.PORT || 3001;
   const baseURL = process.env.BETTER_AUTH_URL || `http://localhost:${port}`;
-  const webOrigin = process.env.WEB_ORIGIN || 'http://localhost:3000';
 
   return betterAuth({
     appName: 'MediLab',
@@ -69,7 +69,7 @@ function buildAuth(pool: Pool, secret: string) {
     basePath: '/api/better-auth',
     secret,
     database: pool,
-    trustedOrigins: [webOrigin, baseURL],
+    trustedOrigins: getTrustedOrigins(baseURL),
     emailAndPassword: {
       enabled: true,
       minPasswordLength: 6,

@@ -8,6 +8,7 @@
 import * as fs from 'fs';
 import { labRepoAuthHeaders, type LabRepoCredentials } from './lab-repo-config';
 import * as path from 'path';
+import { DATA_DIR } from '../config/data-dir';
 import { dbService } from '../db/db.service';
 
 // ── Types ──
@@ -57,7 +58,7 @@ export interface ExamLoincSearchResult {
 
 // ── Constants ──
 
-const CACHE_DIR = path.resolve(process.cwd(), 'data');
+const CACHE_DIR = DATA_DIR;
 const EXAM_LOINC_CACHE_FILE = path.join(CACHE_DIR, 'exam-loinc.json');
 
 const API_BASE = 'https://testeps.e-prescription.gr/labdatarepository';

@@ -9,6 +9,7 @@ import { reportGenerator } from '@medilab/report-generator';
 import { SeverityLevel, Patient, Visit, Referral, Exam, Appointment, AppointmentStatus } from '@medilab/core';
 import { referenceRangeManager } from '@medilab/reference-ranges';
 import { authMiddleware, requireRole, requestLogger, rateLimiter } from '../middleware';
+import { corsOptions } from '../config/cors';
 import { dbService, financeStatusFromAmounts, type FinanceEntry, type FinancePayment, type FinanceEntryStatus } from '../db/db.service';
 import {
   getAuth,
@@ -116,7 +117,7 @@ async function syncOnLogin(userId: string, doctorIp?: string) {
 }
 
 // Middleware
-app.use(cors());
+app.use(cors(corsOptions));
 
 // Better Auth native endpoints (π.χ. /api/better-auth/ok)
 // Πρέπει να μπει πριν το express.json() ώστε να μη καταναλώνεται το raw body.

@@ -9,6 +9,8 @@ import { loincCache } from './services/loinc-cache.service';
 import { examCatalog } from './services/exam-catalog.service';
 import { examLoinc } from './services/exam-loinc.service';
 import { resolveLabRepoCredentials, setLabRepoCredentials, loadLabRepoApiKeyFromDb } from './services/lab-repo-config';
+import { getAllowedOrigins } from './config/cors';
+import { DATA_DIR } from './config/data-dir';
 import {
   listStaleUsers,
   syncUser,
@@ -135,6 +137,11 @@ app.listen(Number(PORT), HOST, () => {
     console.log(`📦 LOINC cache: ${loincCache.isLoaded ? `${loincCache.cacheSize} codes loaded` : 'Not loaded (run sync)'}`);
     console.log(`📋 Exam catalog: ${examCatalog.isLoaded ? `${examCatalog.size} exams loaded` : 'Not loaded (run sync)'}`);
     console.log(`📋 Exam LOINC: ${examLoinc.isLoaded ? `${examLoinc.size} entries loaded` : 'Not loaded (run sync)'}`);
+    const origins = getAllowedOrigins();
+    console.log(
+      `🌐 CORS/Better Auth origins: ${origins.length ? origins.join(', ') : '(κανένα — επιτρέπονται όλα)'}`
+    );
+    console.log(`🗂️  Data dir: ${DATA_DIR}`);
   });
 
   startEfulfillmentScheduler();
