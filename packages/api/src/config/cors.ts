@@ -39,6 +39,27 @@ export function isDeployed(): boolean {
   return Boolean(process.env.RENDER || process.env.VERCEL) || process.env.NODE_ENV === 'production';
 }
 
+export function isLocalConfigLeaked(): boolean {
+  return isDeployed() && looksLikeLeftoverLocalConfig();
+}
+
+/**
+ * Χρησιμοποιήθηκε η τιμή του `.env.local` αντί για τις Environment Variables;
+ * Το Render δέχεται `http://192.168.x.x` / `http://<public-ip>` ως valid URL, οπότε ένα
+ * τυχαίο localhost/LAN origin από το αρχείο είναι ύποπτο για σε deployed instance.
+ */
+function looksLikeLeftoverLocalConfig(): boolean {
+  if (!isDeployed()) return false;
+  const origins = getAllowedOrigins();
+  const authUrl = (process.env.BETTER_AUTH_URL || '').trim();
+
+  if (authUrl && /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(authUrl)) {
+    return true;
+  }
+
+  return origins.length > 0 && origins.every(origin => LOCAL_HOST.test(origin) || PRIVATE_HOST.test(origin));
+}
+
 function matchesPattern(origin: string, pattern: string): boolean {
   if (pattern === '*') return true;
   if (!pattern.includes('*')) return origin === pattern;
@@ -59,9 +80,9 @@ export function isOriginAllowed(origin?: string): boolean {
     return true;
   }
 
-  // Μόνο localhost στο allowlist → το deployment δεν έχει ρυθμιστεί σωστά.
-  // Δεν ρίχνουμε το site: επιτρέπουμε (με warning) όπως η παλιά `cors()`.
-  if (isDeployed() && !hasPublicOrigin()) {
+  // Deployed instance με ρυθμίσεις που μυρίζουν localhost (.env.local) → επιτρέπουμε
+  // (με warning) όπως η παλιά `cors()`, ώστε να μη σπάει το site.
+  if (isDeployed() && (looksLikeLeftoverLocalConfig() || !hasPublicOrigin())) {
     return true;
   }
 
@@ -83,9 +104,9 @@ export const corsOptions: CorsOptions = {
 export function getTrustedOrigins(baseURL: string): string[] {
   const configured = getAllowedOrigins();
 
-  // Allowlist μόνο για localhost → μάλλον ξεχάστηκε το WEB_ORIGIN/CORS_ORIGIN.
-  // Επιτρέπουμε τα Vercel deployments ώστε να μη σπάει το login/logout.
-  if (isDeployed() && !hasPublicOrigin()) {
+  // Deployed instance με ρυθμίσεις που μυρίζουν localhost (.env.local) → επιτρέπουμε
+  // τα Vercel deployments ώστε να μη σπάει το login/logout.
+  if (isDeployed() && (looksLikeLeftoverLocalConfig() || !hasPublicOrigin())) {
     return [...new Set([...configured, baseURL, 'https://*.vercel.app'])];
   }
 

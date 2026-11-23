@@ -9,7 +9,7 @@ import { loincCache } from './services/loinc-cache.service';
 import { examCatalog } from './services/exam-catalog.service';
 import { examLoinc } from './services/exam-loinc.service';
 import { resolveLabRepoCredentials, setLabRepoCredentials, loadLabRepoApiKeyFromDb } from './services/lab-repo-config';
-import { getAllowedOrigins, hasPublicOrigin, isDeployed } from './config/cors';
+import { getAllowedOrigins, hasPublicOrigin, isDeployed, isLocalConfigLeaked } from './config/cors';
 import { DATA_DIR } from './config/data-dir';
 import {
   listStaleUsers,
@@ -141,11 +141,13 @@ app.listen(Number(PORT), HOST, () => {
     console.log(
       `🌐 CORS/Better Auth origins: ${origins.length ? origins.join(', ') : '(κανένα — επιτρέπονται όλα)'}`
     );
-    if (isDeployed() && !hasPublicOrigin()) {
+    if (isLocalConfigLeaked() || (isDeployed() && !hasPublicOrigin())) {
       console.warn(
-        '⚠️  CORS/Better Auth: δεν έχει οριστεί origin του frontend (CORS_ORIGIN / WEB_ORIGIN). ' +
-          'Επιτρέπονται προσωρινά όλα ώστε να μη σπάσει το deployment — όρισε π.χ. ' +
-          'CORS_ORIGIN=https://<frontend>.vercel.app,https://*.vercel.app και κάνε redeploy.'
+        '⚠️  CORS/Better Auth: το deployment βλέπει ρυθμίσεις localhost από το .env.local ' +
+          '(WEB_ORIGIN/CORS_ORIGIN/BETTER_AUTH_URL). Επιτρέπονται προσωρινά όλα ώστε να μη σπάσει ' +
+          'το site — όρισε π.χ. WEB_ORIGIN=https://<frontend>.vercel.app, ' +
+          'CORS_ORIGIN=https://<frontend>.vercel.app,https://*.vercel.app, ' +
+          'BETTER_AUTH_URL=https://<backend>.onrender.com και κάνε redeploy.'
       );
     }
     console.log(`🗂️  Data dir: ${DATA_DIR}`);
