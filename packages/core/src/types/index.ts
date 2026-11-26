@@ -234,6 +234,13 @@ export interface Appointment {
   hapioBookingId?: string;
   /** Στοιχεία σύνδεσης με Hapio */
   hapio?: HapioBookingLink;
+  /** Καταγραφή αποστολής υπενθυμίσεων (ISO timestamps) */
+  reminders?: {
+    /** email + SMS ~24h πριν */
+    dayBeforeAt?: string;
+    /** email ~3h πριν */
+    threeHoursBeforeAt?: string;
+  };
   createdAt: string;
   updatedAt: string;
 }

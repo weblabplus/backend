@@ -83,6 +83,7 @@ import {
   createResource,
   parseHapioDuration,
 } from '../services/hapio.service';
+import { runAppointmentReminders } from '../services/reminders.service';
 import {
   getOrCreateBookingToken,
   rotateBookingToken,
@@ -1012,6 +1013,39 @@ app.post('/api/public/booking-attribution', async (req: Request, res: Response) 
     res.json({ ok: true });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// ========== REMINDERS (υπενθυμίσεις ραντεβού) ==========
+
+/**
+ * Εκτελεί τις υπενθυμίσεις (24h email+SMS, 3h email).
+ * Καλείται από εξωτερικό scheduler με header `x-cron-secret`, ή από admin.
+ */
+app.post('/api/reminders/run', authMiddleware(true), async (req: Request, res: Response) => {
+  const secret = (process.env.REMINDER_CRON_SECRET || '').trim();
+  const provided = String(req.headers['x-cron-secret'] || '').trim();
+
+  const cronOk = Boolean(secret) && provided === secret;
+  const adminOk = req.user?.role === 'admin';
+
+  if (!cronOk && !adminOk) {
+    if (!secret) {
+      res.status(503).json({
+        error: 'Οι υπενθυμίσεις δεν είναι ρυθμισμένες (λείπει REMINDER_CRON_SECRET)',
+        code: 'NOT_CONFIGURED',
+      });
+      return;
+    }
+    res.status(403).json({ error: 'Μη έγκυρο cron secret', code: 'FORBIDDEN' });
+    return;
+  }
+
+  try {
+    const result = await runAppointmentReminders();
+    res.json({ message: 'Οι υπενθυμίσεις εκτελέστηκαν', ...result });
+  } catch (error: any) {
+    res.status(500).json({ error: error?.message || 'Σφάλμα υπενθυμίσεων' });
   }
 });
 

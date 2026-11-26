@@ -1,0 +1,30 @@
+name: Appointment reminders
+
+on:
+  schedule:
+    # Κάθε 15 λεπτά — οι υπενθυμίσεις έχουν παράθυρο ±30′, άρα δεν χάνονται.
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: reminders
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger reminders endpoint
+        env:
+          API_URL: ${{ secrets.REMINDER_API_URL }}
+          CRON_SECRET: ${{ secrets.REMINDER_CRON_SECRET }}
+        run: |
+          if [ -z "$API_URL" ] || [ -z "$CRON_SECRET" ]; then
+            echo "::warning::REMINDER_API_URL ή REMINDER_CRON_SECRET δεν έχει οριστεί στα repo secrets"
+            exit 1
+          fi
+          curl --fail --silent --show-error --max-time 120 \
+            -X POST "${API_URL%/}/api/reminders/run" \
+            -H "x-cron-secret: ${CRON_SECRET}" \
+            -H "content-type: application/json" \
+            --retry 2 --retry-delay 10
