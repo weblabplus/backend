@@ -317,3 +317,4 @@ CREATE INDEX IF NOT EXISTS idx_appointments_doctor ON appointments(doctor_id);
 CREATE INDEX IF NOT EXISTS idx_appointments_scheduled_at ON appointments(scheduled_at);
 CREATE INDEX IF NOT EXISTS idx_appointments_status ON appointments(status);
 CREATE INDEX IF NOT EXISTS idx_appointments_visit ON appointments(visit_id);
+CREATE INDEX IF NOT EXISTS idx_appointments_hapio_booking ON appointments((data->>'hapioBookingId'));

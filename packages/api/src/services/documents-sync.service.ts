@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // Συγχρονισμός παραστατικών από Emporiko Documents API
 // (κέντρο αναφοράς ΜΙΚΡΟΑΝΑΛΥΣΗ).
 //
@@ -162,9 +162,13 @@ async function fetchDocuments(
   center: ReferenceCenter,
   cfg: DocumentsConfig,
   from: string,
-  to: string
+  to: string,
+  timeoutOverrideMs?: number
 ): Promise<EmporikoDocument[]> {
-  const timeout = Number(process.env.EMPORIKO_DOCUMENTS_TIMEOUT_MS) || 30_000;
+  const timeout =
+    Number.isFinite(timeoutOverrideMs) && (timeoutOverrideMs as number) > 0
+      ? Number(timeoutOverrideMs)
+      : Number(process.env.EMPORIKO_DOCUMENTS_TIMEOUT_MS) || 30_000;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
 
@@ -295,7 +299,7 @@ function buildNotes(center: ReferenceCenter, doc: EmporikoDocument): string {
  */
 export async function syncCenterDocuments(
   centerId: string = DEFAULT_CENTER_ID,
-  options: { monthsBack?: number } = {}
+  options: { monthsBack?: number; timeoutMs?: number } = {}
 ): Promise<DocumentsSyncResult> {
   const center = await dbService.getReferenceCenter(centerId);
   if (!center) {
@@ -324,7 +328,7 @@ export async function syncCenterDocuments(
   const fetchErrors: string[] = [];
 
   if (months <= SYNC_CHUNK_MONTHS) {
-    documents.push(...(await fetchDocuments(center, cfg, from, to)));
+    documents.push(...(await fetchDocuments(center, cfg, from, to, options.timeoutMs)));
   } else {
     const overallStart = monthsBack(months);
     let windowEnd = new Date();
@@ -337,7 +341,7 @@ export async function syncCenterDocuments(
       const chunkTo = isoDate(windowEnd);
 
       try {
-        documents.push(...(await fetchDocuments(center, cfg, chunkFrom, chunkTo)));
+        documents.push(...(await fetchDocuments(center, cfg, chunkFrom, chunkTo, options.timeoutMs)));
       } catch (err: any) {
         // Μία αποτυχία δεν ακυρώνει ολόκληρο το ιστορικό
         fetchErrors.push(`${chunkFrom} → ${chunkTo}: ${err?.message || err}`);

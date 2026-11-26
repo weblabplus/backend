@@ -68,6 +68,8 @@ export interface Patient {
   height?: number;  // cm
   weight?: number;  // kg
   amka?: string;    // Αριθμός Μητρώου Κοινωνικής Ασφάλισης (AMKA)
+  email?: string;   // email επικοινωνίας (π.χ. από online ραντεβού)
+  phone?: string;   // τηλέφωνο επικοινωνίας
 }
 
 /** Μία εργαστηριακή εξέταση */
@@ -204,6 +206,18 @@ export enum AppointmentStatus {
   NO_SHOW = 'no_show',
 }
 
+/** Σύνδεση ραντεβού με Hapio booking */
+export interface HapioBookingLink {
+  bookingId: string;
+  serviceId?: string;
+  locationId?: string;
+  resourceId?: string;
+  /** Πότε έγινε ο τελευταίος συγχρονισμός */
+  syncedAt?: string;
+  /** Τελευταίο σφάλμα συγχρονισμού (αν υπάρχει) */
+  lastError?: string;
+}
+
 /** Μοντέλο ραντεβού (Ημερολόγιο) */
 export interface Appointment {
   id: string;
@@ -216,6 +230,10 @@ export interface Appointment {
   notes?: string;         // σημειώσεις
   status: AppointmentStatus;
   visitId?: string;       // Η επίσκεψη στην οποία μετατράπηκε
+  /** ID του αντίστοιχου booking στο Hapio */
+  hapioBookingId?: string;
+  /** Στοιχεία σύνδεσης με Hapio */
+  hapio?: HapioBookingLink;
   createdAt: string;
   updatedAt: string;
 }

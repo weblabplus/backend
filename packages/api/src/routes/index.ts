@@ -1,4 +1,4 @@
-import express, { Request, Response, NextFunction } from 'express';
+﻿import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import multer from 'multer';
 import { toNodeHandler } from 'better-auth/node';
@@ -62,6 +62,33 @@ import {
   syncCenterDocuments,
   isDocumentsApiConfigured,
 } from '../services/documents-sync.service';
+import {
+  HapioError,
+  createBookingForAppointment,
+  updateBookingForAppointment,
+  cancelBookingIfExists,
+  getHapioConfig,
+  isHapioConfigured,
+  getProject,
+  listLocations,
+  listServices,
+  listResources,
+  listBookings,
+  getBookableSlots,
+  toBookingSummary,
+  setupHapioProject,
+  syncBookingsToAppointments,
+  updateServiceSettings,
+  selectResource,
+  createResource,
+  parseHapioDuration,
+} from '../services/hapio.service';
+import {
+  getOrCreateBookingToken,
+  rotateBookingToken,
+  resolveBookingToken,
+  attributeBooking,
+} from '../services/booking-links.service';
 
 // ============================================================
 // Express API Server
@@ -78,6 +105,32 @@ function clientIp(req: Request): string | undefined {
   const ip = (raw || req.ip || '').trim().replace(/^::ffff:/, '');
   if (!ip || ip === '::1' || ip === '127.0.0.1') return undefined;
   return ip;
+}
+
+/** Μετάφραση σφάλματος Hapio σε απάντηση HTTP */
+function sendHapioError(res: Response, error: unknown, fallbackStatus = 502): void {
+  if (error instanceof HapioError) {
+    let status = fallbackStatus;
+    if (error.code === 'NOT_CONFIGURED') status = 503;
+    else if (error.status === 404) status = 404;
+    else if (error.status === 403) status = 403;
+    else if (error.status === 422) status = 422;
+    else if (error.status && error.status >= 400 && error.status < 500) status = error.status;
+
+    res.status(status).json({
+      error: error.message,
+      code: error.code,
+      ...(error.details ? { details: error.details } : {}),
+    });
+    return;
+  }
+  res.status(500).json({ error: (error as any)?.message || 'Σφάλμα Hapio' });
+}
+
+/** Αν η αυτόματη αποστολή ραντεβού στο Hapio είναι ενεργή (default: ναι) */
+function hapioAutoPushEnabled(): boolean {
+  const flag = (process.env.HAPIO_AUTO_PUSH || '').trim().toLowerCase();
+  return flag !== 'false' && flag !== '0' && flag !== 'off';
 }
 
 /**
@@ -858,10 +911,113 @@ app.post(
   }
 );
 
+// ========== BOOKING LINKS (προσωπικό link online ραντεβού) ==========
+
+/** Το προσωπικό link του συνδεδεμένου χρήστη */
+app.get('/api/booking-link', authMiddleware(), async (req: Request, res: Response) => {
+  try {
+    const uid = req.user?.uid;
+    if (!uid) {
+      res.status(401).json({ error: 'Απαιτείται αυθεντικοποίηση', code: 'AUTH_REQUIRED' });
+      return;
+    }
+    const token = await getOrCreateBookingToken(uid);
+    const profile = await dbService.getUserProfile(uid);
+    res.json({
+      token,
+      owner: { uid, displayName: profile?.displayName || profile?.email || '' },
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/** Ανανέωση του προσωπικού link (ακυρώνει το παλιό) */
+app.post('/api/booking-link/rotate', authMiddleware(), async (req: Request, res: Response) => {
+  try {
+    const uid = req.user?.uid;
+    if (!uid) {
+      res.status(401).json({ error: 'Απαιτείται αυθεντικοποίηση', code: 'AUTH_REQUIRED' });
+      return;
+    }
+    const token = await rotateBookingToken(uid);
+    res.json({ token, message: 'Το link ανανεώθηκε — το παλιό δεν ισχύει πλέον.' });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/** Λίστα με τα links όλων των χρηστών (admin) */
+app.get(
+  '/api/admin/booking-links',
+  authMiddleware(),
+  requireRole('admin'),
+  async (_req: Request, res: Response) => {
+    try {
+      const users = await dbService.listUsers();
+      const links = await Promise.all(
+        users.map(async user => ({
+          uid: user.uid,
+          displayName: user.displayName || user.email,
+          email: user.email,
+          role: user.role,
+          token: await getOrCreateBookingToken(user.uid),
+        }))
+      );
+      res.json({ links, total: links.length });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+/** Δημόσιος έλεγχος token (για το booking app) — δεν εκθέτει uid */
+app.get('/api/public/booking-link/:token', async (req: Request, res: Response) => {
+  try {
+    const uid = await resolveBookingToken(req.params.token);
+    if (!uid) {
+      res.status(404).json({ valid: false, error: 'Μη έγκυρο link' });
+      return;
+    }
+    const profile = await dbService.getUserProfile(uid);
+    res.json({
+      valid: true,
+      owner: { displayName: profile?.displayName || 'Medisend' },
+    });
+  } catch (error: any) {
+    res.status(500).json({ valid: false, error: error.message });
+  }
+});
+
+/**
+ * Δημόσια καταγραφή προέλευσης κράτησης (από το booking app).
+ * Το token είναι το μυστικό· δεν απαιτείται login.
+ */
+app.post('/api/public/booking-attribution', async (req: Request, res: Response) => {
+  try {
+    const token = String(req.body?.token || '').trim();
+    const bookingId = String(req.body?.bookingId || '').trim();
+
+    if (!token || !bookingId) {
+      res.status(400).json({ error: 'Απαιτούνται token και bookingId', code: 'MISSING_FIELDS' });
+      return;
+    }
+
+    const uid = await attributeBooking(token, bookingId);
+    if (!uid) {
+      res.status(404).json({ error: 'Μη έγκυρο link', code: 'INVALID_TOKEN' });
+      return;
+    }
+
+    res.json({ ok: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ============================================================
 // ADMIN ROUTES (admin only)
 // ============================================================
-
 /** Λίστα χρηστών */
 app.get(
   '/api/admin/users',
@@ -1134,7 +1290,7 @@ app.get('/api/appointments/:id', authMiddleware(), async (req: Request, res: Res
   }
 });
 
-/** Δημιουργία νέου ραντεβού */
+/** Δημιουργία νέου ραντεβού (προαιρετικά δημιουργεί και Hapio booking) */
 app.post('/api/appointments', authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { patientId, patientName, scheduledAt, reason, notes, durationMinutes, status } = req.body;
@@ -1167,14 +1323,46 @@ app.post('/api/appointments', authMiddleware(), async (req: Request, res: Respon
       updatedAt: now,
     };
 
-    const saved = await dbService.saveAppointment(appointment);
-    res.status(201).json({ appointment: saved });
+    let saved = await dbService.saveAppointment(appointment);
+    let hapioWarning: string | undefined;
+
+    // Αυτόματη δημιουργία booking στο Hapio (αν έχει ρυθμιστεί)
+    const wantsHapio =
+      req.body?.hapio !== false &&
+      appointment.status !== AppointmentStatus.CANCELLED &&
+      appointment.status !== AppointmentStatus.NO_SHOW;
+    if (wantsHapio && hapioAutoPushEnabled() && (await isHapioConfigured())) {
+      try {
+        const booking = await createBookingForAppointment(saved, {
+          serviceId: req.body?.hapioServiceId,
+          locationId: req.body?.hapioLocationId,
+          resourceId: req.body?.hapioResourceId,
+        });
+        saved = await dbService.updateAppointment(saved.id, {
+          hapioBookingId: booking.id,
+          hapio: {
+            bookingId: booking.id,
+            serviceId: booking.service?.id,
+            locationId: booking.location?.id,
+            resourceId: booking.resource?.id,
+            syncedAt: new Date().toISOString(),
+          },
+        });
+      } catch (err: any) {
+        hapioWarning = err?.message || 'Αποτυχία δημιουργίας booking στο Hapio';
+        saved = await dbService.updateAppointment(saved.id, {
+          hapio: { bookingId: '', lastError: hapioWarning },
+        });
+      }
+    }
+
+    res.status(201).json({ appointment: saved, ...(hapioWarning ? { hapioWarning } : {}) });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-/** Ενημέρωση ραντεβού */
+/** Ενημέρωση ραντεβού (συγχρονίζει και το Hapio booking) */
 app.put('/api/appointments/:id', authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { status, scheduledAt } = req.body;
@@ -1190,6 +1378,8 @@ app.put('/api/appointments/:id', authMiddleware(), async (req: Request, res: Res
     const updates: Partial<Appointment> = { ...req.body };
     delete updates.id;
     delete updates.createdAt;
+    delete updates.hapioBookingId;
+    delete updates.hapio;
     if (scheduledAt) updates.scheduledAt = new Date(scheduledAt).toISOString();
     if (updates.durationMinutes !== undefined) {
       updates.durationMinutes = Number(updates.durationMinutes) > 0
@@ -1203,18 +1393,68 @@ app.put('/api/appointments/:id', authMiddleware(), async (req: Request, res: Res
       return;
     }
 
-    const appointment = await dbService.updateAppointment(req.params.id, updates);
-    res.json({ appointment });
+    let appointment = await dbService.updateAppointment(req.params.id, updates);
+    const warnings: string[] = [];
+
+    if (appointment.hapioBookingId && (await isHapioConfigured())) {
+      const cancelledStatus =
+        appointment.status === AppointmentStatus.CANCELLED ||
+        appointment.status === AppointmentStatus.NO_SHOW;
+
+      try {
+        if (cancelledStatus) {
+          await cancelBookingIfExists(appointment.hapioBookingId);
+          appointment = await dbService.updateAppointment(appointment.id, {
+            hapio: { ...(appointment.hapio || { bookingId: appointment.hapioBookingId }), syncedAt: new Date().toISOString() },
+          });
+        } else {
+          // Κάθε μεταβολή (ώρα, διάρκεια, λόγος, σημειώσεις, ασθενής) ανεβαίνει απευθείας
+          const booking = await updateBookingForAppointment(appointment.hapioBookingId, appointment);
+          appointment = await dbService.updateAppointment(appointment.id, {
+            hapio: {
+              bookingId: booking.id,
+              serviceId: booking.service?.id,
+              locationId: booking.location?.id,
+              resourceId: booking.resource?.id,
+              syncedAt: new Date().toISOString(),
+            },
+          });
+        }
+      } catch (err: any) {
+        warnings.push(err?.message || 'Αποτυχία συγχρονισμού με Hapio');
+        appointment = await dbService.updateAppointment(appointment.id, {
+          hapio: {
+            ...(appointment.hapio || {
+              bookingId: appointment.hapioBookingId || '',
+            }),
+            lastError: warnings[warnings.length - 1],
+          },
+        });
+      }
+    }
+
+    res.json({ appointment, ...(warnings.length > 0 ? { hapioWarning: warnings.join(' · ') } : {}) });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-/** Διαγραφή ραντεβού (η τυχόν επίσκεψη που δημιουργήθηκε παραμένει) */
+/** Διαγραφή ραντεβού (ακυρώνει και το Hapio booking) */
 app.delete('/api/appointments/:id', authMiddleware(), async (req: Request, res: Response) => {
   try {
+    const appointment = await dbService.getAppointment(req.params.id);
+    let hapioWarning: string | undefined;
+
+    if (appointment?.hapioBookingId && (await isHapioConfigured())) {
+      const canceled = await cancelBookingIfExists(appointment.hapioBookingId);
+      if (canceled.error) hapioWarning = canceled.error;
+    }
+
     await dbService.deleteAppointment(req.params.id);
-    res.json({ message: 'Το ραντεβού διαγράφηκε επιτυχώς' });
+    res.json({
+      message: 'Το ραντεβού διαγράφηκε επιτυχώς',
+      ...(hapioWarning ? { hapioWarning } : {}),
+    });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -1277,6 +1517,436 @@ app.post(
       res.status(201).json({ appointment: updated, visit: savedVisit });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// ========== HAPIO (ραντεβού / bookings) ==========
+
+/** Κατάσταση σύνδεσης με Hapio */
+app.get('/api/hapio/status', authMiddleware(), async (_req: Request, res: Response) => {
+  const config = await getHapioConfig();
+  const base = {
+    configured: Boolean(config.apiKey),
+    baseUrl: config.baseUrl,
+    defaults: {
+      locationId: config.locationId || null,
+      serviceId: config.serviceId || null,
+      resourceId: config.resourceId || null,
+    },
+    autoPush: hapioAutoPushEnabled(),
+  };
+
+  if (!config.apiKey) {
+    res.json({ ...base, connected: false });
+    return;
+  }
+
+  try {
+    const [project, locations, services, resources] = await Promise.all([
+      getProject(),
+      listLocations(),
+      listServices(),
+      listResources(),
+    ]);
+
+    const serviceId = config.serviceId || services[0]?.id;
+    const service = services.find(item => item.id === serviceId);
+    const resourceId = config.resourceId || resources[0]?.id;
+    const resource = resources.find(item => item.id === resourceId);
+
+    res.json({
+      ...base,
+      connected: true,
+      project: { id: project.id, name: project.name, enabled: project.enabled },
+      counts: {
+        locations: locations.length,
+        services: services.length,
+        resources: resources.length,
+      },
+      booking: {
+        serviceId: service?.id ?? null,
+        serviceName: service?.name ?? null,
+        durationMinutes: parseHapioDuration(service?.duration),
+        bookableIntervalMinutes: parseHapioDuration(service?.bookable_interval),
+        resourceId: resource?.id ?? null,
+        resourceName: resource?.name ?? null,
+      },
+      options: {
+        services: services.map(item => ({
+          id: item.id,
+          name: item.name,
+          durationMinutes: parseHapioDuration(item.duration),
+          bookableIntervalMinutes: parseHapioDuration(item.bookable_interval),
+        })),
+        resources: resources.map(item => ({ id: item.id, name: item.name })),
+      },
+    });
+  } catch (error) {
+    res.json({
+      ...base,
+      connected: false,
+      error: (error as any)?.message || 'Σφάλμα σύνδεσης με Hapio',
+      code: error instanceof HapioError ? error.code : undefined,
+    });
+  }
+});
+
+/** Δημιουργία προεπιλογών (location / service / resource / ωράριο) — admin */
+app.post(
+  '/api/hapio/setup',
+  authMiddleware(),
+  requireRole('admin'),
+  async (req: Request, res: Response) => {
+    try {
+      const result = await setupHapioProject({
+        locationName: req.body?.locationName,
+        serviceName: req.body?.serviceName,
+        resourceName: req.body?.resourceName,
+        timeZone: req.body?.timeZone,
+        serviceDurationMinutes: Number(req.body?.serviceDurationMinutes) || undefined,
+      });
+      res.status(201).json({ message: 'Οι προεπιλογές Hapio είναι έτοιμες', ...result });
+    } catch (error) {
+      sendHapioError(res, error);
+    }
+  }
+);
+
+app.get('/api/hapio/locations', authMiddleware(), async (_req: Request, res: Response) => {
+  try {
+    res.json({ locations: await listLocations() });
+  } catch (error) {
+    sendHapioError(res, error);
+  }
+});
+
+app.get('/api/hapio/services', authMiddleware(), async (_req: Request, res: Response) => {
+  try {
+    res.json({ services: await listServices() });
+  } catch (error) {
+    sendHapioError(res, error);
+  }
+});
+
+app.get('/api/hapio/resources', authMiddleware(), async (_req: Request, res: Response) => {
+  try {
+    res.json({ resources: await listResources() });
+  } catch (error) {
+    sendHapioError(res, error);
+  }
+});
+
+/** Ρυθμίσεις ραντεβού: διάρκεια + βήμα διαθεσιμότητας (admin) */
+app.patch(
+  '/api/hapio/service',
+  authMiddleware(),
+  requireRole('admin'),
+  async (req: Request, res: Response) => {
+    try {
+      const durationMinutes = Number(req.body?.durationMinutes) || undefined;
+      const bookableIntervalMinutes = Number(req.body?.bookableIntervalMinutes) || undefined;
+
+      const validDurations = [10, 15, 20, 30, 45, 60, 90, 120];
+      const validIntervals = [5, 10, 15, 20, 30, 60];
+
+      if (durationMinutes && !validDurations.includes(durationMinutes)) {
+        res.status(400).json({
+          error: `Μη έγκυρη διάρκεια. Επιτρεπτές τιμές: ${validDurations.join(', ')} λεπτά`,
+          code: 'INVALID_DURATION',
+        });
+        return;
+      }
+      if (bookableIntervalMinutes && !validIntervals.includes(bookableIntervalMinutes)) {
+        res.status(400).json({
+          error: `Μη έγκυρο βήμα ώρας. Επιτρεπτές τιμές: ${validIntervals.join(', ')} λεπτά`,
+          code: 'INVALID_INTERVAL',
+        });
+        return;
+      }
+
+      const service = await updateServiceSettings({ durationMinutes, bookableIntervalMinutes });
+      res.json({
+        message: 'Οι ρυθμίσεις ραντεβού ενημερώθηκαν',
+        service,
+        durationMinutes: parseHapioDuration(service.duration),
+        bookableIntervalMinutes: parseHapioDuration(service.bookable_interval),
+      });
+    } catch (error) {
+      sendHapioError(res, error);
+    }
+  }
+);
+
+/** Επιλογή προσωπικού (resource) για τα online ραντεβού (admin) */
+app.put(
+  '/api/hapio/resource',
+  authMiddleware(),
+  requireRole('admin'),
+  async (req: Request, res: Response) => {
+    try {
+      const resourceId = String(req.body?.resourceId || '').trim();
+      if (!resourceId) {
+        res.status(400).json({ error: 'Απαιτείται resourceId', code: 'MISSING_RESOURCE' });
+        return;
+      }
+      const resource = await selectResource(resourceId);
+      res.json({ message: `Το προσωπικό ορίστηκε σε «${resource.name}»`, resource });
+    } catch (error) {
+      sendHapioError(res, error);
+    }
+  }
+);
+
+/** Δημιουργία νέου προσωπικού (resource) (admin) */
+app.post(
+  '/api/hapio/resources',
+  authMiddleware(),
+  requireRole('admin'),
+  async (req: Request, res: Response) => {
+    try {
+      const name = String(req.body?.name || '').trim();
+      if (!name) {
+        res.status(400).json({ error: 'Απαιτείται όνομα', code: 'MISSING_NAME' });
+        return;
+      }
+      const resource = await createResource({
+        name,
+        maxSimultaneousBookings: Number(req.body?.maxSimultaneousBookings) || 1,
+      });
+      res.status(201).json({ message: `Το προσωπικό «${resource.name}» δημιουργήθηκε`, resource });
+    } catch (error) {
+      sendHapioError(res, error);
+    }
+  }
+);
+
+/** Bookings απευθείας από το Hapio (για προβολή/έλεγχο) */
+app.get('/api/hapio/bookings', authMiddleware(), async (req: Request, res: Response) => {
+  try {
+    const from = (req.query.from as string) || undefined;
+    const to = (req.query.to as string) || undefined;
+    const canceled = String(req.query.canceled || 'exclude');
+    const bookings = await listBookings({
+      from,
+      to,
+      locationId: (req.query.locationId as string) || undefined,
+      serviceId: (req.query.serviceId as string) || undefined,
+      resourceId: (req.query.resourceId as string) || undefined,
+      canceled:
+        canceled === 'include' || canceled === 'only' ? canceled : 'exclude',
+      temporary: 'exclude',
+    });
+    const summaries = bookings.map(toBookingSummary);
+    res.json({ bookings: summaries, total: summaries.length });
+  } catch (error) {
+    sendHapioError(res, error);
+  }
+});
+
+/** Διαθέσιμα slots υπηρεσίας (availability) */
+app.get('/api/hapio/availability', authMiddleware(), async (req: Request, res: Response) => {
+  try {
+    const config = await getHapioConfig();
+    const serviceId = (req.query.serviceId as string) || config.serviceId || '';
+    const locationId = (req.query.locationId as string) || config.locationId || '';
+    const from = (req.query.from as string) || new Date().toISOString();
+    const to =
+      (req.query.to as string) ||
+      new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+
+    if (!serviceId) {
+      res.status(400).json({
+        error: 'Απαιτείται serviceId (ή ρυθμισμένο HAPIO_SERVICE_ID)',
+        code: 'MISSING_SERVICE',
+      });
+      return;
+    }
+    if (!locationId) {
+      res.status(400).json({
+        error: 'Απαιτείται locationId (ή ρυθμισμένο HAPIO_LOCATION_ID)',
+        code: 'MISSING_LOCATION',
+      });
+      return;
+    }
+
+    const slots = await getBookableSlots(serviceId, {
+      from,
+      to,
+      locationId,
+      resourceId: (req.query.resourceId as string) || config.resourceId,
+    });
+    res.json({ serviceId, locationId, from, to, slots, total: slots.length });
+  } catch (error) {
+    sendHapioError(res, error);
+  }
+});
+
+/** Εισαγωγή bookings από Hapio στα τοπικά ραντεβού (ημέρα, μήνας ή from/to) */
+app.post('/api/hapio/sync', authMiddleware(), async (req: Request, res: Response) => {
+  try {
+    const month = String(req.body?.month || '').trim();
+    const monthMatch = /^(\d{4})-(\d{2})$/.exec(month);
+    const date = String(req.body?.date || '').trim();
+    const dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+
+    let from = String(req.body?.from || '').trim();
+    let to = String(req.body?.to || '').trim();
+
+    if (monthMatch) {
+      const year = Number(monthMatch[1]);
+      const monthIndex = Number(monthMatch[2]) - 1;
+      from = new Date(year, monthIndex, 1, 0, 0, 0, 0).toISOString();
+      to = new Date(year, monthIndex + 1, 0, 23, 59, 59, 999).toISOString();
+    } else if (dateMatch) {
+      from = new Date(
+        Number(dateMatch[1]),
+        Number(dateMatch[2]) - 1,
+        Number(dateMatch[3]),
+        0,
+        0,
+        0,
+        0
+      ).toISOString();
+      to = new Date(
+        Number(dateMatch[1]),
+        Number(dateMatch[2]) - 1,
+        Number(dateMatch[3]),
+        23,
+        59,
+        59,
+        999
+      ).toISOString();
+    }
+
+    if (!from || !to) {
+      res.status(400).json({
+        error: 'Απαιτείται month (YYYY-MM), date (YYYY-MM-DD) ή from/to',
+        code: 'MISSING_RANGE',
+      });
+      return;
+    }
+    if (Number.isNaN(new Date(from).getTime()) || Number.isNaN(new Date(to).getTime())) {
+      res.status(400).json({ error: 'Μη έγκυρο εύρος ημερομηνιών', code: 'INVALID_RANGE' });
+      return;
+    }
+
+    const result = await syncBookingsToAppointments({ from, to, doctorId: req.user?.uid });
+    res.json({ message: 'Ο συγχρονισμός ολοκληρώθηκε', from, to, ...result });
+  } catch (error) {
+    sendHapioError(res, error);
+  }
+});
+
+/**
+ * Χειροκίνητος συγχρονισμός ραντεβού με το Hapio.
+ * - Αν δεν υπάρχει booking → δημιουργία (201)
+ * - Αν υπάρχει → επανάληψη ενημέρωσης (200), π.χ. μετά από «fully booked»
+ */
+app.post('/api/appointments/:id/hapio', authMiddleware(), async (req: Request, res: Response) => {
+  try {
+    const appointment = await dbService.getAppointment(req.params.id);
+    if (!appointment) {
+      res.status(404).json({ error: 'Το ραντεβού δεν βρέθηκε' });
+      return;
+    }
+
+    // Ήδη συνδεδεμένο → επανασυγχρονισμός των στοιχείων του ραντεβού
+    if (appointment.hapioBookingId) {
+      try {
+        const booking = await updateBookingForAppointment(appointment.hapioBookingId, appointment);
+        const updated = await dbService.updateAppointment(appointment.id, {
+          hapio: {
+            bookingId: booking.id,
+            serviceId: booking.service?.id,
+            locationId: booking.location?.id,
+            resourceId: booking.resource?.id,
+            syncedAt: new Date().toISOString(),
+          },
+        });
+        res.json({ appointment: updated, booking: toBookingSummary(booking), resynced: true });
+      } catch (err) {
+        const message = (err as any)?.message || 'Αποτυχία επανασυγχρονισμού με Hapio';
+        const failed = await dbService.updateAppointment(appointment.id, {
+          hapio: {
+            ...(appointment.hapio || { bookingId: appointment.hapioBookingId }),
+            lastError: message,
+          },
+        });
+        if (err instanceof HapioError && err.code !== 'NOT_CONFIGURED') {
+          res.status(502).json({
+            error: message,
+            code: 'HAPIO_RESYNC_FAILED',
+            appointment: failed,
+          });
+          return;
+        }
+        sendHapioError(res, err);
+      }
+      return;
+    }
+
+    const booking = await createBookingForAppointment(appointment, {
+      serviceId: req.body?.serviceId,
+      locationId: req.body?.locationId,
+      resourceId: req.body?.resourceId,
+    });
+
+    const updated = await dbService.updateAppointment(appointment.id, {
+      hapioBookingId: booking.id,
+      hapio: {
+        bookingId: booking.id,
+        serviceId: booking.service?.id,
+        locationId: booking.location?.id,
+        resourceId: booking.resource?.id,
+        syncedAt: new Date().toISOString(),
+      },
+    });
+
+    res.status(201).json({ appointment: updated, booking: toBookingSummary(booking) });
+  } catch (error) {
+    sendHapioError(res, error);
+  }
+});
+
+/** Ακύρωση του Hapio booking ενός ραντεβού */
+app.post(
+  '/api/appointments/:id/hapio/cancel',
+  authMiddleware(),
+  async (req: Request, res: Response) => {
+    try {
+      const appointment = await dbService.getAppointment(req.params.id);
+      if (!appointment) {
+        res.status(404).json({ error: 'Το ραντεβού δεν βρέθηκε' });
+        return;
+      }
+      if (!appointment.hapioBookingId) {
+        res.status(409).json({
+          error: 'Το ραντεβού δεν είναι συνδεδεμένο με booking στο Hapio',
+          code: 'NOT_LINKED',
+        });
+        return;
+      }
+
+      const canceled = await cancelBookingIfExists(appointment.hapioBookingId);
+      if (canceled.error) {
+        res.status(502).json({ error: canceled.error, code: 'HAPIO_CANCEL_FAILED' });
+        return;
+      }
+
+      const updated = await dbService.updateAppointment(appointment.id, {
+        hapio: {
+          bookingId: appointment.hapioBookingId,
+          serviceId: appointment.hapio?.serviceId,
+          locationId: appointment.hapio?.locationId,
+          resourceId: appointment.hapio?.resourceId,
+          syncedAt: new Date().toISOString(),
+        },
+      });
+
+      res.json({ appointment: updated, canceled: canceled.canceled });
+    } catch (error) {
+      sendHapioError(res, error);
     }
   }
 );
@@ -2838,7 +3508,7 @@ function parseFinanceAmount(value: any): number | null {
   return roundMoney(num);
 }
 
-/** GET /api/finance/entries — λίστα κινήσεων ταμείου */
+/** GET /api/finance/entries — λίστα κινήσεων ταμείου (σελιδοποιημένη) */
 app.get('/api/finance/entries', authMiddleware(), async (req: Request, res: Response) => {
   try {
     const doctorId = req.user?.role === 'admin' ? undefined : req.user?.uid;
@@ -2846,27 +3516,44 @@ app.get('/api/finance/entries', authMiddleware(), async (req: Request, res: Resp
     const partyType = String(req.query.partyType || '').trim();
     const status = String(req.query.status || '').trim();
 
-    const entries = await dbService.listFinanceEntries({
-      doctorId,
-      direction: (FINANCE_DIRECTIONS as readonly string[]).includes(direction) ? direction : undefined,
-      partyType: (FINANCE_PARTY_TYPES as readonly string[]).includes(partyType) ? partyType : undefined,
-      status: (FINANCE_STATUSES as readonly string[]).includes(status) ? status : undefined,
-      patientId: (req.query.patientId as string) || undefined,
-      referralId: (req.query.referralId as string) || undefined,
-      dueFrom: (req.query.dueFrom as string) || undefined,
-      dueTo: (req.query.dueTo as string) || undefined,
-    });
+    // all=1 → όλες οι κινήσεις (για CSV/εκτύπωση), αλλιώς μόνο η ζητούμενη σελίδα
+    const all = ['1', 'true', 'yes'].includes(String(req.query.all || '').toLowerCase());
 
-    const q = String(req.query.q || '').trim().toLowerCase();
-    const filtered = q
-      ? entries.filter(entry =>
-          [entry.partyName, entry.patientName, entry.description, entry.referralBarcode, entry.notes]
-            .filter(Boolean)
-            .some(value => String(value).toLowerCase().includes(q))
-        )
-      : entries;
+    const page = Number(req.query.page) > 0 ? Number(req.query.page) : 1;
+    const pageSize = Number(req.query.pageSize) > 0 ? Number(req.query.pageSize) : 10;
 
-    res.json({ entries: filtered, total: filtered.length });
+    const result = await dbService.listFinanceEntriesPage(
+      {
+        doctorId,
+        direction: (FINANCE_DIRECTIONS as readonly string[]).includes(direction) ? direction : undefined,
+        partyType: (FINANCE_PARTY_TYPES as readonly string[]).includes(partyType) ? partyType : undefined,
+        status: (FINANCE_STATUSES as readonly string[]).includes(status) ? status : undefined,
+        patientId: (req.query.patientId as string) || undefined,
+        referralId: (req.query.referralId as string) || undefined,
+        dueFrom: (req.query.dueFrom as string) || undefined,
+        dueTo: (req.query.dueTo as string) || undefined,
+        year: /^\d{4}$/.test(String(req.query.year || '')) ? String(req.query.year) : undefined,
+      },
+      {
+        page,
+        pageSize,
+        search: (req.query.q as string) || undefined,
+        all,
+      }
+    );
+
+    res.json(result);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/** GET /api/finance/years — διαθέσιμα έτη κινήσεων */
+app.get('/api/finance/years', authMiddleware(), async (req: Request, res: Response) => {
+  try {
+    const doctorId = req.user?.role === 'admin' ? undefined : req.user?.uid;
+    const years = await dbService.listFinanceEntryYears({ doctorId });
+    res.json({ years });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -2876,126 +3563,14 @@ app.get('/api/finance/entries', authMiddleware(), async (req: Request, res: Resp
 app.get('/api/finance/summary', authMiddleware(), async (req: Request, res: Response) => {
   try {
     const doctorId = req.user?.role === 'admin' ? undefined : req.user?.uid;
-    const entries = await dbService.listFinanceEntries({ doctorId });
-    const todayDate = new Date().toISOString().slice(0, 10);
-
-    const totals = {
-      debts: 0,
-      debtsPaid: 0,
-      debtsOutstanding: 0,
-      receivables: 0,
-      receivablesPaid: 0,
-      receivablesOutstanding: 0,
-      overdueAmount: 0,
-      overdueCount: 0,
-      openCount: 0,
-      settledCount: 0,
-      cancelledCount: 0,
-      /** Σύνολο οφειλών προς κέντρα όπως το δίνει το API (άθροισμα DeductedAmount) */
-      centerOutstandingFromApi: 0,
-    };
-
-    const byPartyTypeMap = new Map<
-      string,
-      {
-        direction: string;
-        partyType: string;
-        count: number;
-        amount: number;
-        paidAmount: number;
-        outstanding: number;
-      }
-    >();
-    const byPartyMap = new Map<
-      string,
-      {
-        direction: string;
-        partyType: string;
-        partyId?: string;
-        partyName: string;
-        count: number;
-        amount: number;
-        paidAmount: number;
-        outstanding: number;
-      }
-    >();
-
-    for (const entry of entries) {
-      if (entry.status === 'cancelled') {
-        totals.cancelledCount++;
-        continue;
-      }
-
-      const amount = roundMoney(Number(entry.amount) || 0);
-      const paid = roundMoney(Number(entry.paidAmount) || 0);
-      const outstanding = roundMoney(Math.max(0, amount - paid));
-
-      if (entry.direction === 'debt') {
-        totals.debts = roundMoney(totals.debts + amount);
-        totals.debtsPaid = roundMoney(totals.debtsPaid + paid);
-        totals.debtsOutstanding = roundMoney(totals.debtsOutstanding + outstanding);
-      } else {
-        totals.receivables = roundMoney(totals.receivables + amount);
-        totals.receivablesPaid = roundMoney(totals.receivablesPaid + paid);
-        totals.receivablesOutstanding = roundMoney(totals.receivablesOutstanding + outstanding);
-      }
-
-      if (entry.status === 'settled') totals.settledCount++;
-      else totals.openCount++;
-
-      const isOverdue =
-        Boolean(entry.dueDate) && entry.status !== 'settled' && entry.dueDate! < todayDate && outstanding > 0;
-      if (isOverdue) {
-        totals.overdueAmount = roundMoney(totals.overdueAmount + outstanding);
-        totals.overdueCount++;
-      }
-
-      // Άθροισμα DeductedAmount από το κέντρο (πιστωτικά μειώνουν το σύνολο)
-      if (entry.source?.deductedAmount !== undefined) {
-        totals.centerOutstandingFromApi = roundMoney(
-          totals.centerOutstandingFromApi + Number(entry.source.deductedAmount)
-        );
-      }
-
-      const typeKey = `${entry.direction}|${entry.partyType}`;
-      const typeAgg =
-        byPartyTypeMap.get(typeKey) ||
-        { direction: entry.direction, partyType: entry.partyType, count: 0, amount: 0, paidAmount: 0, outstanding: 0 };
-      typeAgg.count++;
-      typeAgg.amount = roundMoney(typeAgg.amount + amount);
-      typeAgg.paidAmount = roundMoney(typeAgg.paidAmount + paid);
-      typeAgg.outstanding = roundMoney(typeAgg.outstanding + outstanding);
-      byPartyTypeMap.set(typeKey, typeAgg);
-
-      const partyKey = `${entry.direction}|${entry.partyType}|${entry.partyId || entry.partyName}`;
-      const partyAgg =
-        byPartyMap.get(partyKey) ||
-        {
-          direction: entry.direction,
-          partyType: entry.partyType,
-          partyId: entry.partyId,
-          partyName: entry.partyName,
-          count: 0,
-          amount: 0,
-          paidAmount: 0,
-          outstanding: 0,
-        };
-      partyAgg.count++;
-      partyAgg.amount = roundMoney(partyAgg.amount + amount);
-      partyAgg.paidAmount = roundMoney(partyAgg.paidAmount + paid);
-      partyAgg.outstanding = roundMoney(partyAgg.outstanding + outstanding);
-      byPartyMap.set(partyKey, partyAgg);
-    }
-
-    res.json({
-      totals,
-      byPartyType: Array.from(byPartyTypeMap.values()),
-      byParty: Array.from(byPartyMap.values()).sort((a, b) => b.outstanding - a.outstanding),
-    });
+    // Τα σύνολα υπολογίζονται στη βάση (SQL aggregation) — δεν φορτώνονται όλες οι κινήσεις
+    const summary = await dbService.getFinanceSummary({ doctorId });
+    res.json(summary);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
+
 
 /** POST /api/finance/entries — δημιουργία κίνησης */
 app.post('/api/finance/entries', authMiddleware(), async (req: Request, res: Response) => {
@@ -3317,11 +3892,13 @@ app.post('/api/finance/sync', authMiddleware(), async (req: Request, res: Respon
     }
 
     const monthsBack = mode === 'auto' ? AUTO_SYNC_MONTHS : MANUAL_SYNC_MONTHS;
+    // Ο αυτόματος συγχρονισμός δεν πρέπει να «κολλάει» την πρώτη επίσκεψη
+    const timeoutMs = mode === 'auto' ? 10_000 : undefined;
 
     const results: any[] = [];
     for (const center of targets) {
       try {
-        results.push(await syncCenterDocuments(center.id, { monthsBack }));
+        results.push(await syncCenterDocuments(center.id, { monthsBack, timeoutMs }));
       } catch (err: any) {
         results.push({
           centerId: center.id,
@@ -3341,6 +3918,14 @@ app.post('/api/finance/sync', authMiddleware(), async (req: Request, res: Respon
     const failed = results.filter(result => result.error);
     if (failed.length === results.length) {
       const error = failed[0].error || 'Ο συγχρονισμός απέτυχε';
+      // Καταγράφουμε την ημερήσια προσπάθεια ώστε να μην επαναλαμβάνεται σε κάθε άνοιγμα
+      if (mode === 'auto') {
+        try {
+          await dbService.setSetting(AUTO_SYNC_KEY, today);
+        } catch (err: any) {
+          console.warn('Finance auto sync date save failed:', err?.message || err);
+        }
+      }
       res.status(error.includes('δεν βρέθηκε') ? 404 : 502).json({
         error,
         code: 'DOCUMENTS_SYNC_FAILED',
@@ -3357,8 +3942,9 @@ app.post('/api/finance/sync', authMiddleware(), async (req: Request, res: Respon
       )
       .join(' · ');
 
-    // Σημειώνουμε τον αυτόματο συγχρονισμό της ημέρας μόνο αν πέτυχε
-    if (mode === 'auto' && failed.length === 0) {
+    // Σημειώνουμε την ημερήσια προσπάθεια (και σε αποτυχία) ώστε να μην
+    // επαναλαμβάνεται συγχρονισμός σε κάθε άνοιγμα της σελίδας.
+    if (mode === 'auto') {
       try {
         await dbService.setSetting(AUTO_SYNC_KEY, today);
       } catch (err: any) {

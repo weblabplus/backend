@@ -81,6 +81,12 @@ async function startServer() {
       console.log(`⚙️  Φορτώθηκαν ${loaded} ρυθμίσεις E-Fulfillment από τη βάση`);
     }
 
+    // Ρυθμίσεις Hapio (ραντεβού) από τη βάση — υπερισχύουν των env vars
+    const loadedHapio = await dbService.loadSettingsIntoEnv('HAPIO_');
+    if (loadedHapio > 0) {
+      console.log(`⚙️  Φορτώθηκαν ${loadedHapio} ρυθμίσεις Hapio από τη βάση`);
+    }
+
     // Api-Key Lab Data Repository από τη βάση (υπερισχύει του .env)
     try {
       const storedKey = await loadLabRepoApiKeyFromDb();

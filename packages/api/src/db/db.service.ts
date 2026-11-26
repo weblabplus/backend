@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // PostgreSQL Database Service
 // Αντικαθιστά το Firestore CRUD με Neon PostgreSQL.
 // Το Better Auth (πίνακας "user") είναι η μοναδική πηγή χρηστών.
@@ -510,6 +510,29 @@ export class DbService {
     return res.rows.length > 0 ? (res.rows[0].data as Patient) : null;
   }
 
+  /**
+   * Αναζήτηση ασθενούς με email ή τηλέφωνο επικοινωνίας.
+   * Χρησιμοποιείται για online ραντεβού όπου το Hapio έχει μόνο στοιχεία
+   * επικοινωνίας (χωρίς patientId). Το τηλέφωνο συγκρίνεται μόνο στα ψηφία.
+   */
+  async findPatientByContact(email?: string, phone?: string): Promise<Patient | null> {
+    if (!this.pool) return null;
+    const mail = String(email || '').trim().toLowerCase();
+    const digits = String(phone || '').replace(/\D/g, '');
+
+    if (!mail && !digits) return null;
+
+    const res = await this.pool.query(
+      `SELECT data FROM patients
+       WHERE ($1::text <> '' AND lower(trim(COALESCE(data->>'email', ''))) = $1)
+          OR ($2::text <> '' AND regexp_replace(COALESCE(data->>'phone', ''), '\\D', '', 'g') = $2)
+       ORDER BY created_at ASC
+       LIMIT 1`,
+      [mail, digits]
+    );
+    return res.rows.length > 0 ? (res.rows[0].data as Patient) : null;
+  }
+
   async savePatient(patient: Patient): Promise<Patient> {
     if (!this.pool) return patient;
     const indexed = extractIndexedFields('patients', patient as any);
@@ -784,6 +807,16 @@ export class DbService {
   async getAppointment(id: string): Promise<Appointment | null> {
     if (!this.pool) return null;
     const res = await this.pool.query('SELECT data FROM appointments WHERE id = $1', [id]);
+    return res.rows.length > 0 ? (res.rows[0].data as Appointment) : null;
+  }
+
+  /** Εύρεση ραντεβού με βάση το Hapio booking id */
+  async getAppointmentByHapioBookingId(bookingId: string): Promise<Appointment | null> {
+    if (!this.pool) return null;
+    const res = await this.pool.query(
+      `SELECT data FROM appointments WHERE data->>'hapioBookingId' = $1 LIMIT 1`,
+      [bookingId]
+    );
     return res.rows.length > 0 ? (res.rows[0].data as Appointment) : null;
   }
 
@@ -1592,7 +1625,30 @@ export class DbService {
   // FINANCE / ΤΑΜΕΙΟ (οφειλές & απαιτήσεις)
   // ============================================================
 
-  async listFinanceEntries(
+  /** Διαθέσιμα έτη κινήσεων (για την εξαγωγή/εκτύπωση ανά έτος) */
+  async listFinanceEntryYears(
+    filters: { doctorId?: string; partyType?: string; direction?: string } = {}
+  ): Promise<Array<{ year: string; count: number }>> {
+    if (!this.pool) return [];
+
+    const { clause, values } = this.buildFinanceWhere(filters);
+    const where = clause ? `${clause} AND issue_date IS NOT NULL` : `WHERE issue_date IS NOT NULL`;
+
+    const res = await this.pool.query(
+      `SELECT to_char(issue_date, 'YYYY') AS year, COUNT(*)::int AS count
+       FROM finance_entries ${where}
+       GROUP BY 1
+       ORDER BY 1 DESC`,
+      values
+    );
+
+    return res.rows
+      .filter(row => row.year)
+      .map(row => ({ year: String(row.year), count: Number(row.count || 0) }));
+  }
+
+  /** Κοινή κατασκευή WHERE για κινήσεις ταμείου (φίλτρα + αναζήτηση) */
+  private buildFinanceWhere(
     filters: {
       direction?: string;
       partyType?: string;
@@ -1601,13 +1657,13 @@ export class DbService {
       patientId?: string;
       referralId?: string;
       doctorId?: string;
-      /** Φίλτρο ημερομηνίας λήξης (YYYY-MM-DD) */
       dueFrom?: string;
       dueTo?: string;
-    } = {}
-  ): Promise<FinanceEntry[]> {
-    if (!this.pool) return [];
-
+      /** Έτος έκδοσης (YYYY) */
+      year?: string;
+    } = {},
+    search?: string
+  ): { clause: string; values: any[] } {
     const conditions: string[] = [];
     const values: any[] = [];
 
@@ -1629,13 +1685,302 @@ export class DbService {
     if (filters.dueFrom) addCondition(index => `due_date >= $${index}`, filters.dueFrom);
     if (filters.dueTo) addCondition(index => `due_date <= $${index}`, filters.dueTo);
 
-    const clause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    if (filters.year && /^\d{4}$/.test(filters.year)) {
+      addCondition(index => `issue_date >= $${index}::date`, `${filters.year}-01-01`);
+      addCondition(index => `issue_date < $${index}::date`, `${Number(filters.year) + 1}-01-01`);
+    }
+
+    const q = String(search || '').trim();
+    if (q) {
+      values.push(`%${q}%`);
+      const index = values.length;
+      conditions.push(
+        `(party_name ILIKE $${index}` +
+          ` OR COALESCE(data->>'patientName', '') ILIKE $${index}` +
+          ` OR COALESCE(data->>'description', '') ILIKE $${index}` +
+          ` OR COALESCE(data->>'referralBarcode', '') ILIKE $${index}` +
+          ` OR COALESCE(data->>'notes', '') ILIKE $${index})`
+      );
+    }
+
+    return { clause: conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '', values };
+  }
+
+  async listFinanceEntries(
+    filters: {
+      direction?: string;
+      partyType?: string;
+      partyId?: string;
+      status?: string;
+      patientId?: string;
+      referralId?: string;
+      doctorId?: string;
+      /** Φίλτρο ημερομηνίας λήξης (YYYY-MM-DD) */
+      dueFrom?: string;
+      dueTo?: string;
+    } = {}
+  ): Promise<FinanceEntry[]> {
+    if (!this.pool) return [];
+
+    const { clause, values } = this.buildFinanceWhere(filters);
     const res = await this.pool.query(
       `SELECT data FROM finance_entries ${clause}
        ORDER BY issue_date DESC NULLS LAST, created_at DESC`,
       values
     );
     return res.rows.map(r => normalizeFinanceEntry(r.data as FinanceEntry));
+  }
+
+  /**
+   * Σελιδοποιημένη λίστα κινήσεων ταμείου — φορτώνονται μόνο οι γραμμές
+   * της ζητούμενης σελίδας (η αναζήτηση και τα φίλτρα γίνονται στη βάση).
+   */
+  async listFinanceEntriesPage(
+    filters: {
+      direction?: string;
+      partyType?: string;
+      partyId?: string;
+      status?: string;
+      patientId?: string;
+      referralId?: string;
+      doctorId?: string;
+      dueFrom?: string;
+      dueTo?: string;
+      /** Έτος έκδοσης (YYYY) */
+      year?: string;
+    } = {},
+    options: { page?: number; pageSize?: number; search?: string; all?: boolean } = {}
+  ): Promise<{
+    entries: FinanceEntry[];
+    total: number;
+    page: number;
+    pageSize: number;
+    totals: { amount: number; paidAmount: number; balance: number };
+    counts: { all: number; debt: number; receivable: number };
+  }> {
+    const pageSize = Math.max(1, Math.min(200, Number(options.pageSize) || 10));
+    const page = Math.max(1, Number(options.page) || 1);
+    const empty = {
+      entries: [] as FinanceEntry[],
+      total: 0,
+      page,
+      pageSize,
+      totals: { amount: 0, paidAmount: 0, balance: 0 },
+      counts: { all: 0, debt: 0, receivable: 0 },
+    };
+
+    if (!this.pool) return empty;
+
+    const { clause, values } = this.buildFinanceWhere(filters, options.search);
+
+    const stats = await this.pool.query(
+      `SELECT
+         COUNT(*)::int AS total,
+         COALESCE(SUM(amount), 0)::float8 AS amount,
+         COALESCE(SUM(paid_amount), 0)::float8 AS paid_amount,
+         COUNT(*) FILTER (WHERE direction = 'debt')::int AS debt_count,
+         COUNT(*) FILTER (WHERE direction = 'receivable')::int AS receivable_count
+       FROM finance_entries ${clause}`,
+      values
+    );
+
+    const total = Number(stats.rows[0]?.total || 0);
+    const amount = Number(stats.rows[0]?.amount || 0);
+    const paidAmount = Number(stats.rows[0]?.paid_amount || 0);
+
+    const counts = {
+      all: total,
+      debt: Number(stats.rows[0]?.debt_count || 0),
+      receivable: Number(stats.rows[0]?.receivable_count || 0),
+    };
+
+    if (total === 0) {
+      return {
+        ...empty,
+        totals: { amount: 0, paidAmount: 0, balance: 0 },
+      };
+    }
+
+    const limit = options.all ? total : pageSize;
+    const offset = options.all ? 0 : (page - 1) * pageSize;
+
+    const res = await this.pool.query(
+      `SELECT data FROM finance_entries ${clause}
+       ORDER BY issue_date DESC NULLS LAST, created_at DESC
+       LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+      [...values, limit, offset]
+    );
+
+    return {
+      entries: res.rows.map(r => normalizeFinanceEntry(r.data as FinanceEntry)),
+      total,
+      page,
+      pageSize: options.all ? total : pageSize,
+      totals: {
+        amount: Math.round(amount * 100) / 100,
+        paidAmount: Math.round(paidAmount * 100) / 100,
+        balance: Math.round(Math.max(0, amount - paidAmount) * 100) / 100,
+      },
+      counts,
+    };
+  }
+
+  /** Σύνολα οφειλών/απαιτήσεων με SQL aggregation (χωρίς φόρτωση όλων των γραμμών) */
+  async getFinanceSummary(filters: { doctorId?: string } = {}): Promise<{
+    totals: {
+      debts: number;
+      debtsPaid: number;
+      debtsOutstanding: number;
+      receivables: number;
+      receivablesPaid: number;
+      receivablesOutstanding: number;
+      overdueAmount: number;
+      overdueCount: number;
+      openCount: number;
+      settledCount: number;
+      cancelledCount: number;
+      centerOutstandingFromApi: number;
+      /** Πόσες κινήσεις κέντρων έχουν DeductedAmount από το API */
+      centerDeductedCount: number;
+    };
+    byPartyType: Array<{
+      direction: string;
+      partyType: string;
+      count: number;
+      amount: number;
+      paidAmount: number;
+      outstanding: number;
+    }>;
+    byParty: Array<{
+      direction: string;
+      partyType: string;
+      partyId?: string;
+      partyName: string;
+      count: number;
+      amount: number;
+      paidAmount: number;
+      outstanding: number;
+    }>;
+  }> {
+    const totals = {
+      debts: 0,
+      debtsPaid: 0,
+      debtsOutstanding: 0,
+      receivables: 0,
+      receivablesPaid: 0,
+      receivablesOutstanding: 0,
+      overdueAmount: 0,
+      overdueCount: 0,
+      openCount: 0,
+      settledCount: 0,
+      cancelledCount: 0,
+      centerOutstandingFromApi: 0,
+      centerDeductedCount: 0,
+    };
+
+    if (!this.pool) return { totals, byPartyType: [], byParty: [] };
+
+    const { clause, values } = this.buildFinanceWhere(filters);
+    const activeClause = clause ? `${clause} AND status <> 'cancelled'` : `WHERE status <> 'cancelled'`;
+    const round2 = (value: number) => Math.round(value * 100) / 100;
+
+    const typeRes = await this.pool.query(
+      `SELECT direction,
+              party_type,
+              COUNT(*)::int AS count,
+              COALESCE(SUM(amount), 0)::float8 AS amount,
+              COALESCE(SUM(paid_amount), 0)::float8 AS paid_amount,
+              COALESCE(SUM(GREATEST(amount - paid_amount, 0)), 0)::float8 AS outstanding
+       FROM finance_entries ${activeClause}
+       GROUP BY direction, party_type`,
+      values
+    );
+
+    const byPartyType = typeRes.rows.map(row => ({
+      direction: String(row.direction),
+      partyType: String(row.party_type),
+      count: Number(row.count || 0),
+      amount: round2(Number(row.amount || 0)),
+      paidAmount: round2(Number(row.paid_amount || 0)),
+      outstanding: round2(Number(row.outstanding || 0)),
+    }));
+
+    for (const row of byPartyType) {
+      if (row.direction === 'debt') {
+        totals.debts = round2(totals.debts + row.amount);
+        totals.debtsPaid = round2(totals.debtsPaid + row.paidAmount);
+        totals.debtsOutstanding = round2(totals.debtsOutstanding + row.outstanding);
+      } else {
+        totals.receivables = round2(totals.receivables + row.amount);
+        totals.receivablesPaid = round2(totals.receivablesPaid + row.paidAmount);
+        totals.receivablesOutstanding = round2(totals.receivablesOutstanding + row.outstanding);
+      }
+    }
+
+    const countersRes = await this.pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE status = 'cancelled')::int AS cancelled_count,
+         COUNT(*) FILTER (WHERE status = 'settled')::int AS settled_count,
+         COUNT(*) FILTER (WHERE status <> 'settled' AND status <> 'cancelled')::int AS open_count,
+         COUNT(*) FILTER (
+           WHERE status <> 'settled' AND status <> 'cancelled'
+             AND due_date IS NOT NULL AND due_date < CURRENT_DATE
+             AND GREATEST(amount - paid_amount, 0) > 0
+         )::int AS overdue_count,
+         COALESCE(SUM(GREATEST(amount - paid_amount, 0)) FILTER (
+           WHERE status <> 'settled' AND status <> 'cancelled'
+             AND due_date IS NOT NULL AND due_date < CURRENT_DATE
+         ), 0)::float8 AS overdue_amount,
+         COALESCE(SUM(
+           CASE
+             WHEN (data->'source'->>'deductedAmount') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+               THEN (data->'source'->>'deductedAmount')::numeric
+             ELSE 0
+           END
+         ) FILTER (WHERE status <> 'cancelled'), 0)::float8 AS center_outstanding,
+         COUNT(*) FILTER (
+           WHERE status <> 'cancelled' AND (data->'source'->>'deductedAmount') IS NOT NULL
+         )::int AS center_deducted_count
+       FROM finance_entries ${clause}`,
+      values
+    );
+
+    const counters = countersRes.rows[0] || {};
+    totals.cancelledCount = Number(counters.cancelled_count || 0);
+    totals.settledCount = Number(counters.settled_count || 0);
+    totals.openCount = Number(counters.open_count || 0);
+    totals.overdueCount = Number(counters.overdue_count || 0);
+    totals.overdueAmount = round2(Number(counters.overdue_amount || 0));
+    totals.centerOutstandingFromApi = round2(Number(counters.center_outstanding || 0));
+    totals.centerDeductedCount = Number(counters.center_deducted_count || 0);
+
+    const partyRes = await this.pool.query(
+      `SELECT direction,
+              party_type,
+              party_id,
+              party_name,
+              COUNT(*)::int AS count,
+              COALESCE(SUM(amount), 0)::float8 AS amount,
+              COALESCE(SUM(paid_amount), 0)::float8 AS paid_amount,
+              COALESCE(SUM(GREATEST(amount - paid_amount, 0)), 0)::float8 AS outstanding
+       FROM finance_entries ${activeClause}
+       GROUP BY direction, party_type, party_id, party_name
+       ORDER BY outstanding DESC`,
+      values
+    );
+
+    const byParty = partyRes.rows.map(row => ({
+      direction: String(row.direction),
+      partyType: String(row.party_type),
+      partyId: row.party_id ? String(row.party_id) : undefined,
+      partyName: String(row.party_name),
+      count: Number(row.count || 0),
+      amount: round2(Number(row.amount || 0)),
+      paidAmount: round2(Number(row.paid_amount || 0)),
+      outstanding: round2(Number(row.outstanding || 0)),
+    }));
+
+    return { totals, byPartyType, byParty };
   }
 
   async getFinanceEntry(id: string): Promise<FinanceEntry | null> {
