@@ -13,6 +13,10 @@ import { dbService } from '../db/db.service';
 const TOKEN_PREFIX = 'BOOKING_LINK_TOKEN:'; // uid  → token
 const OWNER_PREFIX = 'BOOKING_LINK_OWNER:'; // token → uid
 const ATTR_PREFIX = 'BOOKING_ATTR:'; // bookingId → uid
+const CLINIC_NAME_KEY = 'BOOKING_CLINIC_NAME';
+
+/** Προεπιλεγμένο όνομα μονάδας όταν δεν έχει οριστεί στη βάση. */
+export const DEFAULT_CLINIC_NAME = 'Medisend';
 
 function newToken(): string {
   return crypto.randomBytes(18).toString('base64url');
@@ -85,4 +89,45 @@ export async function getBookingOwner(bookingId: string): Promise<string | null>
   const id = String(bookingId || '').trim();
   if (!id) return null;
   return dbService.getSetting(`${ATTR_PREFIX}${id}`);
+}
+
+// ── Όνομα μονάδας (branding του booking app) ──
+
+/** Το όνομα της μονάδας που εμφανίζεται στο booking app (fallback). */
+export async function getClinicName(): Promise<string> {
+  const value = await dbService.getSetting(CLINIC_NAME_KEY);
+  const name = (value || '').trim();
+  return name || DEFAULT_CLINIC_NAME;
+}
+
+/**
+ * Όνομα μονάδας για τον ιδιοκτήτη του link, όπως το έχει φέρει το
+ * e-Prescription («Στοιχεία Φορέα»):
+ *   1. Μονάδα / Φορέας (organizationName)
+ *   2. Ονοματεπώνυμο (fullName)
+ *   3. Fallback ρύθμιση / default
+ */
+export async function getClinicNameForUser(uid: string): Promise<string> {
+  try {
+    const profile = await dbService.getUserProfile(uid);
+    const state = await dbService.getEfulfillmentState(profile?.id || profile?.uid || uid);
+    const data = state.profile || {};
+
+    const organizationName =
+      typeof data.organizationName === 'string' ? data.organizationName.trim() : '';
+    if (organizationName) return organizationName;
+
+    const fullName = typeof data.fullName === 'string' ? data.fullName.trim() : '';
+    if (fullName) return fullName;
+
+    const combined = [data.firstName, data.lastName]
+      .filter((part: unknown): part is string => typeof part === 'string' && Boolean(part.trim()))
+      .join(' ')
+      .trim();
+    if (combined) return combined;
+  } catch {
+    // Χωρίς e-Prescription credentials → fallback
+  }
+
+  return getClinicName();
 }

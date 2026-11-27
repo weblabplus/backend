@@ -89,6 +89,7 @@ import {
   rotateBookingToken,
   resolveBookingToken,
   attributeBooking,
+  getClinicNameForUser,
 } from '../services/booking-links.service';
 
 // ============================================================
@@ -976,14 +977,21 @@ app.get(
 app.get('/api/public/booking-link/:token', async (req: Request, res: Response) => {
   try {
     const uid = await resolveBookingToken(req.params.token);
+
     if (!uid) {
       res.status(404).json({ valid: false, error: 'Μη έγκυρο link' });
       return;
     }
-    const profile = await dbService.getUserProfile(uid);
+
+    const [profile, clinicName] = await Promise.all([
+      dbService.getUserProfile(uid),
+      getClinicNameForUser(uid),
+    ]);
+
     res.json({
       valid: true,
       owner: { displayName: profile?.displayName || 'Medisend' },
+      clinicName,
     });
   } catch (error: any) {
     res.status(500).json({ valid: false, error: error.message });
